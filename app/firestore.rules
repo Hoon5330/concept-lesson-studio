@@ -1,0 +1,120 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownsDocument(ownerUid) {
+      return signedIn() && request.auth.uid == ownerUid;
+    }
+
+    function isInstructor() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/instructors/$(request.auth.uid));
+    }
+
+    function isConceptAdmin() {
+      return signedIn()
+        && request.auth.token.email == "fhqlstms21@gmail.com";
+    }
+
+    function isOwnParticipant(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isMemberOf(teamName, sessionCode) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/conceptParticipants/$(request.auth.uid))
+        && get(/databases/$(database)/documents/conceptParticipants/$(request.auth.uid)).data.teamName == teamName
+        && get(/databases/$(database)/documents/conceptParticipants/$(request.auth.uid)).data.sessionCode == sessionCode;
+    }
+
+    // 기존 웹앱
+    match /instructors/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /teamSubmissions/{uid} {
+      allow create: if ownsDocument(uid)
+        && request.resource.data.ownerUid == request.auth.uid;
+
+      allow read: if ownsDocument(uid) || isInstructor();
+
+      allow update: if isInstructor()
+        || (ownsDocument(uid)
+          && resource.data.finalized != true
+          && request.resource.data.ownerUid == request.auth.uid);
+
+      allow delete: if false;
+    }
+
+    match /personalSubmissions/{uid} {
+      allow create: if ownsDocument(uid)
+        && request.resource.data.ownerUid == request.auth.uid;
+
+      allow read: if ownsDocument(uid) || isInstructor();
+
+      allow update: if ownsDocument(uid)
+        && resource.data.finalized != true
+        && request.resource.data.ownerUid == request.auth.uid;
+
+      allow delete: if false;
+    }
+
+    match /settings/{documentId} {
+      allow read: if signedIn();
+      allow write: if isInstructor();
+    }
+
+    // 개념 기반 교수학습 설계 스튜디오
+    match /conceptParticipants/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isOwnParticipant(uid);
+      allow delete: if isConceptAdmin();
+    }
+
+    match /conceptDesigns/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isOwnParticipant(uid);
+      allow delete: if isConceptAdmin();
+    }
+
+    match /conceptReviews/{reviewId} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && request.resource.data.reviewerId == request.auth.uid
+        && isMemberOf(
+          request.resource.data.teamName,
+          request.resource.data.sessionCode
+        );
+      allow delete: if isConceptAdmin();
+    }
+
+    match /conceptRepresentatives/{representativeId} {
+      allow read: if signedIn();
+      allow create, update: if isConceptAdmin()
+        || isMemberOf(
+          request.resource.data.teamName,
+          request.resource.data.sessionCode
+        );
+      allow delete: if isConceptAdmin();
+    }
+
+    match /conceptAuctionResults/{resultId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isConceptAdmin();
+    }
+
+    match /conceptControls/{sessionCode} {
+      allow read: if signedIn();
+      allow create, update, delete: if isConceptAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
