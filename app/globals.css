@@ -1029,12 +1029,15 @@ input, textarea, select { font-size: 15px; }
   box-shadow: 0 14px 42px rgba(10,28,21,.2);
 }
 .admin-mode .brand small { color: #b9c7c1; }
+.admin-mode .topbar nav,
+.admin-mode .header-action { display: none; }
 .admin-mode .nav-link { color: #c8d3ce; }
 .admin-mode .nav-link:hover,
 .admin-mode .nav-link.active { color: white; background: #305142; }
 .admin-mode .header-action { color: #13241e; background: #8fe0b9; }
 .admin-mode-badge {
   flex: none;
+  margin-left: auto;
   border: 1px solid #4b685c;
   border-radius: 999px;
   padding: 6px 10px;
@@ -1052,6 +1055,10 @@ input, textarea, select { font-size: 15px; }
 .admin-hero p { color: #becbc5; }
 .admin-hero-actions { display: flex; flex-wrap: wrap; gap: 9px; }
 .admin-hero-actions .secondary-btn { border-color: #52675e; color: white; background: #293e35; }
+
+.final-ready-step { min-height: 420px; align-content: start; }
+.final-ready-step .final-callout { padding: 30px; }
+.final-ready-step .report-preview { min-height: 220px; display: flex; flex-direction: column; justify-content: center; }
 
 .score-hidden-notice {
   position: sticky;

@@ -146,7 +146,7 @@ const STEP_META = [
   ["04", "GRASPS와 4수준 루브릭", "목표와 평가 증거를 한 줄로 정렬"],
   ["05", "탐구 7단계와 WHERETO", "개인 설계 후 3인 모둠 동료평가"],
   ["06", "AI·디지털 기능 매칭", "핵심 기능 3개·플랜 B·제목 도출"],
-  ["07", "최종 설계안 완성", "발표 아이디어 반영·PDF 결과 제출"],
+  ["07", "최종 설계안 완성", "완성된 설계안을 확인하고 PDF 결과 만들기"],
 ];
 
 const INQUIRY_STAGES = [
@@ -405,7 +405,7 @@ export default function ConceptStudioApp() {
 
   const persistDraft = async (next: Draft) => {
     localStorage.setItem("concept_studio_draft_v3", JSON.stringify(next));
-    if (store && next.ownerId && view !== "admin") {
+    if (store && next.ownerId && view !== "admin" && !adminLoggedIn) {
       await Promise.all([
         store.set("conceptParticipants", next.ownerId, {
           uid: next.ownerId,
@@ -425,6 +425,7 @@ export default function ConceptStudioApp() {
       setStore(created);
       setDraft((current) => ({
         ...current,
+        ownerId: (current.ownerId || current.profile.name.trim()) ? created.uid() : "",
         profile: {
           ...current.profile,
           sessionCode: created.config.sessionId || "concept-workshop-2026",
@@ -444,7 +445,7 @@ export default function ConceptStudioApp() {
 
   useEffect(() => {
     if (!ready) return;
-    setSaveState("saving");
+    const statusTimer = window.setTimeout(() => setSaveState("saving"), 0);
     const timer = window.setTimeout(async () => {
       const next = { ...draft, currentStep: step, updatedAt: new Date().toISOString() };
       try {
@@ -456,7 +457,10 @@ export default function ConceptStudioApp() {
         setSaveState("error");
       }
     }, 650);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(statusTimer);
+      window.clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, step, ready, store, view]);
 
@@ -594,7 +598,7 @@ export default function ConceptStudioApp() {
       Boolean(draft.grasps.goal && draft.grasps.product && draft.grasps.standards),
       draft.inquiry.stages.every((item) => item.activity.trim()),
       draft.tools.selectedFeatures.length === 3 && Boolean(draft.tools.finalTitle),
-      Boolean(draft.final.revision && draft.completed),
+      Boolean(draft.completed),
     ];
     return checks.filter(Boolean).length;
   }, [draft]);
@@ -641,7 +645,7 @@ export default function ConceptStudioApp() {
         return check && check.score >= 0 && (check.score === 0 || check.evidence.trim());
       });
     if (index === 5) return draft.tools.selectedFeatures.length === 3 && draft.tools.plans.every((item) => item.reason && item.plan && item.planB) && Boolean(draft.tools.finalTitle);
-    return Boolean(draft.final.purchasedIdea && draft.final.revision && draft.final.alignmentCheck);
+    return true;
   };
 
   const missingCountForStep = (index: number) => {
@@ -676,7 +680,7 @@ export default function ConceptStudioApp() {
         total + missing([item.reason, item.plan, item.planB]), 0);
       return featureMissing + planMissing + missing([draft.tools.finalTitle]);
     }
-    return missing([draft.final.purchasedIdea, draft.final.revision, draft.final.alignmentCheck]);
+    return 0;
   };
 
   const retrySave = async () => {
@@ -733,22 +737,40 @@ export default function ConceptStudioApp() {
         inquiry: { ...draft.inquiry, submittedAt: new Date().toISOString() },
         updatedAt: new Date().toISOString(),
       };
-      setDraft(next);
-      setStep(5);
-      if (store && next.ownerId) await store.set("conceptDesigns", next.ownerId, { ...next });
-      setView("team");
-      showToast("개인 설계안을 제출했습니다. 모둠원의 설계안을 확인해 주세요.");
+      setSaveState("saving");
+      try {
+        await persistDraft(next);
+        setDraft(next);
+        setStep(5);
+        setLastSavedAt(next.updatedAt);
+        setSaveState("saved");
+        setView("team");
+        showToast("개인 설계안을 제출했습니다. 모둠원의 설계안을 확인해 주세요.");
+      } catch (error) {
+        console.error("Inquiry submission failed.", error);
+        setSaveState("error");
+        showToast("개인 설계안 제출에 실패했습니다. 저장 상태를 확인하고 다시 시도해 주세요.");
+      }
       return;
     }
     if (step < 6) {
       setStep((current) => current + 1);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } else {
-      const next = { ...draft, completed: true, updatedAt: new Date().toISOString() };
-      setDraft(next);
-      if (store && next.ownerId) await store.set("conceptDesigns", next.ownerId, { ...next });
-      setView("report");
-      showToast("최종 설계안이 완성되었습니다.");
+      const next = { ...draft, currentStep: 6, completed: true, updatedAt: new Date().toISOString() };
+      setSaveState("saving");
+      try {
+        await persistDraft(next);
+        setDraft(next);
+        setLastSavedAt(next.updatedAt);
+        setSaveState("saved");
+        setView("report");
+        showToast("최종 설계안이 완성되었습니다.");
+      } catch (error) {
+        console.error("Final submission failed.", error);
+        setSaveState("error");
+        showToast("최종 설계안 저장에 실패했습니다. 다시 시도해 주세요.");
+      }
     }
   };
 
@@ -1353,14 +1375,8 @@ export default function ConceptStudioApp() {
   );
 
   const renderFinalStep = () => (
-    <div className="step-stack">
-      {renderConceptGuide(6)}
-      <section className="final-callout"><span className="concept-mark large">C</span><div><span className="eyebrow">발표에서 발견한 아이디어로 Upgrade</span><h2>좋은 설계의 한 부분을 내 수업에 맞게 다시 설계합니다.</h2><p>전체 설계안을 복사하지 않고, 발표에서 발견한 핵심 아이디어와 적용 이유를 기록하세요.</p></div></section>
-      <section className="input-card"><h2>1. 발표 아이디어 반영</h2><div className="form-grid">
-        <label>참고한 아이디어의 출처<input value={draft.final.purchaseSource} onChange={(e) => updateSection("final", "purchaseSource", e.target.value)} placeholder="예: 과학 교과군 · 김정보 선생님 설계안" /></label>
-        <label>가져오고 싶은 핵심 아이디어<textarea value={draft.final.purchasedIdea} onChange={(e) => updateSection("final", "purchasedIdea", e.target.value)} placeholder="우리 수업에 적용하고 싶은 구체적인 장점" /></label>
-      </div><label className="field">내 설계안에 반영한 수정 내용<textarea className="tall" value={draft.final.revision} onChange={(e) => updateSection("final", "revision", e.target.value)} placeholder="어느 단계에 무엇을 왜 수정했는지 작성하세요." /></label></section>
-      <section className="input-card"><h2>2. 최종 정렬 점검</h2><label className="field">성취기준 → 일반화 → 수행과제 → 루브릭 → 탐구 활동 → 도구 정렬 확인<textarea className="tall" value={draft.final.alignmentCheck} onChange={(e) => updateSection("final", "alignmentCheck", e.target.value)} placeholder="가장 강한 정렬 지점과 마지막으로 보완한 지점을 적으세요." /></label><label className="padlet-check"><input type="checkbox" checked={draft.final.padletReady} onChange={(e) => updateSection("final", "padletReady", e.target.checked)} /><span><b>패들렛 공유 준비 완료</b><small>개인정보와 학교 내부 정보를 제거했는지 확인했습니다.</small></span></label></section>
+    <div className="step-stack final-ready-step">
+      <section className="final-callout"><span className="concept-mark large">✓</span><div><span className="eyebrow">READY TO COMPLETE</span><h2>교수학습설계안 작성이 모두 끝났습니다.</h2><p>아래 미리보기를 확인한 뒤 ‘최종 설계안 완성’ 버튼을 누르면 PDF 저장 화면으로 이동합니다.</p></div></section>
       <section className="report-preview compact"><span className="eyebrow">FINAL PREVIEW</span><h2>{draft.tools.finalTitle || "최종 수업 제목"}</h2><p>{draft.goal.selectedGoal}</p><div className="preview-chips"><span>{draft.lens.selected}</span><span>{draft.profile.subject}</span><span>{draft.goal.unit}</span></div></section>
     </div>
   );
@@ -1554,11 +1570,23 @@ export default function ConceptStudioApp() {
         <section className="report-section"><h2>04 4수준 분석적 평가 루브릭</h2><div className="table-scroll"><table className="report-table"><thead><tr><th>평가 준거</th><th>4 매우 우수</th><th>3 우수</th><th>2 보통</th><th>1 노력 요함</th></tr></thead><tbody>{draft.grasps.rubric.map((row) => <tr key={row.criterion}><th>{row.criterion}</th><td>{row.level4}</td><td>{row.level3}</td><td>{row.level2}</td><td>{row.level1}</td></tr>)}</tbody></table></div></section>
         <section className="report-section"><h2>05 개념 기반 탐구 7단계</h2><div className="table-scroll"><table className="report-table inquiry"><thead><tr><th>단계</th><th>주요 학생 활동</th><th>핵심 탐구 전략</th></tr></thead><tbody>{draft.inquiry.stages.map((item) => <tr key={item.key}><th>{item.title}</th><td>{item.activity}</td><td>{item.strategy}</td></tr>)}</tbody></table></div><h3>WHERETO 자기점검</h3><div className="report-whereto">{WHERETO.map(([key, , korean]) => { const check = draft.inquiry.whereto[key]; return <div key={key}><b>{key} · {korean} · {check.score}점</b><p>{check.score === 0 ? "해당 없음" : check.evidence}</p></div>; })}</div></section>
         <section className="report-section"><h2>06 AI·디지털 기능과 플랜 B</h2><div className="report-tools">{draft.tools.plans.map((plan) => <article key={plan.feature}><h3>{plan.feature}</h3><b>추천 이유</b><p>{plan.reason}</p><b>도구 예시</b><p>{plan.examples}</p><b>활용 계획</b><p>{plan.plan}</p><b>아날로그 플랜 B</b><p>{plan.planB}</p></article>)}</div></section>
-        <section className="report-section"><h2>07 발표 아이디어 반영과 최종 정렬</h2><h3>참고한 설계안</h3><p>{draft.final.purchaseSource}</p><h3>가져온 핵심 아이디어</h3><p>{draft.final.purchasedIdea}</p><h3>최종 수정</h3><p>{draft.final.revision}</p><h3>정렬 점검</h3><p>{draft.final.alignmentCheck}</p></section>
         <footer className="report-footer">개념 기반 교수학습 설계 워크숍 · {new Date().toLocaleDateString("ko-KR")}</footer>
       </article>
     </section>
   );
+
+  const leaveAdminForParticipant = async () => {
+    try {
+      await store?.logoutAdmin();
+      setAdminLoggedIn(false);
+      setSaveState("idle");
+      setView("home");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (error) {
+      console.error("Admin logout failed.", error);
+      showToast("참여자 화면 전환에 실패했습니다. 페이지를 새로고침해 주세요.");
+    }
+  };
 
   const renderAdmin = () => {
     const participantCount = adminRecords.length;
@@ -1567,7 +1595,7 @@ export default function ConceptStudioApp() {
     const adminReviewsOpen = controls ? Boolean(controls.reviewsOpen) : true;
     const scoresRevealed = Boolean(controls?.scoresRevealed);
     if (!adminLoggedIn) return <section className="admin-login-page"><form className="admin-login-card" onSubmit={loginAdmin}><span className="brand-mark">C</span><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>연수 진행 상태, 개인 설계 제출, 동료평가와 모둠 대표안을 확인합니다.</p><label>강사 이메일<input type="email" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} placeholder={store?.config.adminEmail || "teacher@example.com"} /></label><label>비밀번호<input type="password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} placeholder={store?.mode === "local" ? "데모 비밀번호 1234" : "Firebase 강사 계정 비밀번호"} /></label><button className="primary-btn full" disabled={busy}>{busy ? "확인 중..." : "관제실 입장"}</button></form></section>;
-    return <section className="page-container admin-page"><div className="page-hero admin-hero"><div><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>개인 설계 제출, 모둠별 상호평가, 대표안 선정과 경매 결과를 관리합니다.</p></div><div className="admin-hero-actions"><button className="secondary-btn" onClick={() => setView("home")}>참여자 화면으로</button><button className="secondary-btn" onClick={async () => { await store?.logoutAdmin(); setAdminLoggedIn(false); }}>로그아웃</button></div></div>
+    return <section className="page-container admin-page"><div className="page-hero admin-hero"><div><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>개인 설계 제출, 모둠별 상호평가, 대표안 선정과 경매 결과를 관리합니다.</p></div><div className="admin-hero-actions"><button className="secondary-btn" onClick={leaveAdminForParticipant}>참여자 화면으로</button><button className="secondary-btn" onClick={async () => { await store?.logoutAdmin(); setAdminLoggedIn(false); }}>로그아웃</button></div></div>
       <div className="admin-stats"><article><small>참여자</small><b>{participantCount}</b><span>명</span></article><article><small>모둠</small><b>{teamCount}</b><span>개</span></article><article><small>Step 5 제출</small><b>{inquirySubmitted}</b><span>명</span></article><article><small>동료평가</small><b>{reviews.length}</b><span>건</span></article><article><small>대표안</small><b>{representatives.length}</b><span>/6</span></article><article><small>낙찰 결과</small><b>{auctionResults.length}</b><span>/6</span></article></div>
       <section className="control-panel"><div><span className="eyebrow">LIVE CONTROL</span><h2>평가·경매 진행 제어</h2><p>관리자의 변경 사항은 참여자 화면에 즉시 반영됩니다.</p></div><div className="control-buttons"><button className={adminReviewsOpen ? "on" : ""} onClick={() => saveControls({ reviewsOpen: !adminReviewsOpen })}><span>WHERETO 평가</span><b>{adminReviewsOpen ? "진행 중" : "마감"}</b></button><button className={auctionReady ? "reveal" : ""} disabled={!auctionReady} onClick={() => setView("auction")}><span>경매 현황</span><b>{auctionReady ? "관리자 입력 화면 열기" : `대표안 ${representatives.length}/6`}</b></button><button className={scoresRevealed ? "on" : ""} disabled={!auctionReady} onClick={() => saveControls({ scoresRevealed: !scoresRevealed })}><span>참여자 세부 점수</span><b>{scoresRevealed ? "공개 중 · 다시 숨기기" : "최종 결과 공개"}</b></button></div></section>
       <section className="control-panel"><div><span className="eyebrow">SAFE TEST MODE</span><h2>경매 기능 빠른 테스트</h2><p>실제 참여자 자료와 분리된 6개 모둠 대표안을 생성합니다. 테스트가 끝나면 테스트 자료만 한 번에 삭제할 수 있습니다.</p></div><div className="control-buttons"><button className="reveal" disabled={busy} onClick={createAuctionTestData}><span>테스트 데이터</span><b>{busy ? "처리 중..." : "6모둠 생성"}</b></button><button disabled={busy || !representatives.some((item) => Boolean(item.isTestData))} onClick={deleteAuctionTestData}><span>테스트 종료</span><b>데이터 삭제</b></button></div></section>
@@ -1591,10 +1619,10 @@ export default function ConceptStudioApp() {
   };
 
   return (
-    <main className={`app-shell view-${view} ${presentationMode ? "presentation-mode" : ""} ${view === "admin" ? "admin-mode" : ""}`}>
+    <main className={`app-shell view-${view} ${presentationMode ? "presentation-mode" : ""} ${adminLoggedIn ? "admin-mode" : ""}`}>
       <header className="topbar no-print">
-        <button className="brand" onClick={() => navTo("home")} aria-label="홈"><span className="brand-mark">C</span><span><b>Concept Studio</b><small>개념 기반 교수학습 설계</small></span></button>
-        {view === "admin" && <span className="admin-mode-badge">관리자 모드</span>}
+        <button className="brand" onClick={() => adminLoggedIn ? void leaveAdminForParticipant() : navTo("home")} aria-label="홈"><span className="brand-mark">C</span><span><b>Concept Studio</b><small>개념 기반 교수학습 설계</small></span></button>
+        {adminLoggedIn && <span className="admin-mode-badge">관리자 모드</span>}
         <nav aria-label="주요 메뉴">
           <button className={`nav-link ${view === "design" ? "active" : ""}`} onClick={() => navTo("design")}>설계하기</button>
           <button className={`nav-link ${view === "team" ? "active" : ""}`} onClick={() => navTo("team")}>모둠평가</button>

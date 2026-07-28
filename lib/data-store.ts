@@ -133,12 +133,17 @@ class FirebaseStore implements DataStore {
   config: AppConfig;
   private db: Firestore;
   private auth: ReturnType<typeof getAuth>;
+  private participantDb: Firestore;
+  private participantAuth: ReturnType<typeof getAuth>;
   private anonymousUid = "";
+  private adminAuth: ReturnType<typeof getAuth> | null = null;
 
   constructor(config: AppConfig, db: Firestore, auth: ReturnType<typeof getAuth>, uid: string) {
     this.config = config;
     this.db = db;
     this.auth = auth;
+    this.participantDb = db;
+    this.participantAuth = auth;
     this.anonymousUid = uid;
   }
 
@@ -168,9 +173,15 @@ class FirebaseStore implements DataStore {
   }
 
   async loginAdmin(email: string, password: string) {
-    await signOut(this.auth);
     try {
-      await signInWithEmailAndPassword(this.auth, email, password);
+      const firebase = this.config.firebase || {};
+      const adminApp = getApps().find((app) => app.name === "concept-studio-admin")
+        || initializeApp(firebase, "concept-studio-admin");
+      const adminAuth = getAuth(adminApp);
+      await signInWithEmailAndPassword(adminAuth, email, password);
+      this.adminAuth = adminAuth;
+      this.auth = adminAuth;
+      this.db = getFirestore(adminApp);
     } catch (error) {
       // Firebase Console에서 강사 계정을 만들기 전에는 계정을 자동 생성하지 않습니다.
       // 아래 분기는 개발 중 명확한 오류 전달을 위한 것입니다.
@@ -182,9 +193,11 @@ class FirebaseStore implements DataStore {
   }
 
   async logoutAdmin() {
-    await signOut(this.auth);
-    const credential = await signInAnonymously(this.auth);
-    this.anonymousUid = credential.user.uid;
+    if (this.adminAuth?.currentUser) await signOut(this.adminAuth);
+    this.adminAuth = null;
+    this.auth = this.participantAuth;
+    this.db = this.participantDb;
+    this.anonymousUid = this.participantAuth.currentUser?.uid || this.anonymousUid;
   }
 }
 
@@ -195,8 +208,11 @@ export async function createDataStore(): Promise<DataStore> {
   if (!configured) return new LocalStore(config);
 
   try {
-    const app = getApps()[0] || initializeApp(firebase);
+    const app = getApps().find((item) => item.name === "[DEFAULT]") || initializeApp(firebase);
     const auth = getAuth(app);
+    if (auth.currentUser && !auth.currentUser.isAnonymous) {
+      await signOut(auth);
+    }
     const credential = auth.currentUser ? { user: auth.currentUser } : await signInAnonymously(auth);
     const db = getFirestore(app);
     return new FirebaseStore(config, db, auth, credential.user.uid);
