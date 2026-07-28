@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createDataStore, type DataStore, type PlainRecord } from "@/lib/data-store";
 import { PROMPTS, type PromptKey } from "@/lib/prompts";
 
@@ -114,6 +114,8 @@ type AuctionDraft = {
   buyerTeam: string;
   tokens: string;
 };
+
+type SaveState = "idle" | "saving" | "saved" | "error";
 
 const LENSES = [
   "변화", "관계", "체계", "상호의존", "갈등", "권력",
@@ -391,6 +393,29 @@ export default function ConceptStudioApp() {
   const [adminPassword, setAdminPassword] = useState("");
   const [adminRecords, setAdminRecords] = useState<AppRecord[]>([]);
   const [busy, setBusy] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [lastSavedAt, setLastSavedAt] = useState("");
+  const [expandedGuides, setExpandedGuides] = useState<Record<number, boolean>>({});
+  const [presentationMode, setPresentationMode] = useState(false);
+  const [rankChanges, setRankChanges] = useState<Record<string, number>>({});
+  const [newAuctionResultIds, setNewAuctionResultIds] = useState<string[]>([]);
+  const previousRanksRef = useRef<Record<string, number>>({});
+  const previousAuctionIdsRef = useRef<Set<string>>(new Set());
+  const auctionSnapshotReadyRef = useRef(false);
+
+  const persistDraft = async (next: Draft) => {
+    localStorage.setItem("concept_studio_draft_v3", JSON.stringify(next));
+    if (store && next.ownerId && view !== "admin") {
+      await Promise.all([
+        store.set("conceptParticipants", next.ownerId, {
+          uid: next.ownerId,
+          ...next.profile,
+          updatedAt: next.updatedAt,
+        }),
+        store.set("conceptDesigns", next.ownerId, { ...next }),
+      ]);
+    }
+  };
 
   useEffect(() => {
     // The first client render restores the device-local draft.
@@ -405,25 +430,34 @@ export default function ConceptStudioApp() {
           sessionCode: created.config.sessionId || "concept-workshop-2026",
         },
       }));
+      try {
+        const savedGuideState = JSON.parse(localStorage.getItem("concept_studio_guide_state_v1") || "{}");
+        if (savedGuideState && typeof savedGuideState === "object") {
+          setExpandedGuides(savedGuideState as Record<number, boolean>);
+        }
+      } catch {
+        setExpandedGuides({});
+      }
       setReady(true);
     });
   }, []);
 
   useEffect(() => {
     if (!ready) return;
-    const timer = window.setTimeout(() => {
+    setSaveState("saving");
+    const timer = window.setTimeout(async () => {
       const next = { ...draft, currentStep: step, updatedAt: new Date().toISOString() };
-      localStorage.setItem("concept_studio_draft_v3", JSON.stringify(next));
-      if (store && next.ownerId && view !== "admin") {
-        store.set("conceptParticipants", next.ownerId, {
-          uid: next.ownerId,
-          ...next.profile,
-          updatedAt: next.updatedAt,
-        }).catch(console.error);
-        store.set("conceptDesigns", next.ownerId, { ...next }).catch(console.error);
+      try {
+        await persistDraft(next);
+        setLastSavedAt(next.updatedAt);
+        setSaveState("saved");
+      } catch (error) {
+        console.error("Autosave failed.", error);
+        setSaveState("error");
       }
     }, 650);
     return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, step, ready, store, view]);
 
   useEffect(() => {
@@ -461,6 +495,45 @@ export default function ConceptStudioApp() {
     };
   }, [store, draft.profile.sessionCode]);
 
+  useEffect(() => {
+    const currentIds = new Set(auctionResults.map((item) => item.id));
+    if (!auctionSnapshotReadyRef.current) {
+      auctionSnapshotReadyRef.current = true;
+      previousAuctionIdsRef.current = currentIds;
+      return;
+    }
+    const added = Array.from(currentIds).filter((id) => !previousAuctionIdsRef.current.has(id));
+    previousAuctionIdsRef.current = currentIds;
+    if (!added.length) return;
+    setNewAuctionResultIds(added);
+    const timer = window.setTimeout(() => setNewAuctionResultIds([]), 2400);
+    return () => window.clearTimeout(timer);
+  }, [auctionResults]);
+
+  useEffect(() => {
+    if (!presentationMode) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPresentationMode(false);
+      if (!representatives.length) return;
+      const currentIndex = Math.max(0, representatives.findIndex((item) => item.id === selectedRepresentativeId));
+      if (event.key === "ArrowRight") {
+        setSelectedRepresentativeId(representatives[(currentIndex + 1) % representatives.length].id);
+      }
+      if (event.key === "ArrowLeft") {
+        setSelectedRepresentativeId(representatives[(currentIndex - 1 + representatives.length) % representatives.length].id);
+      }
+    };
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) setPresentationMode(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+    };
+  }, [presentationMode, representatives, selectedRepresentativeId]);
+
   const allTeamSubmitted = useMemo(() =>
     teamRecords.length >= 3 &&
     teamRecords.every((member) => hasInquirySubmission(teamDesigns.find((design) => design.id === member.id))),
@@ -490,6 +563,23 @@ export default function ConceptStudioApp() {
       };
     }).sort((a, b) => b.total - a.total || a.teamName.localeCompare(b.teamName, "ko"));
   }, [representatives, auctionResults]);
+
+  useEffect(() => {
+    if (!auctionReady || !teamStandings.length) return;
+    const currentRanks = Object.fromEntries(teamStandings.map((team, index) => [team.teamName, index + 1]));
+    const previousRanks = previousRanksRef.current;
+    if (Object.keys(previousRanks).length) {
+      const changes = Object.fromEntries(teamStandings.map((team, index) => [
+        team.teamName,
+        Number(previousRanks[team.teamName] || index + 1) - (index + 1),
+      ]));
+      setRankChanges(changes);
+      const timer = window.setTimeout(() => setRankChanges({}), 2600);
+      previousRanksRef.current = currentRanks;
+      return () => window.clearTimeout(timer);
+    }
+    previousRanksRef.current = currentRanks;
+  }, [auctionReady, teamStandings]);
 
   const registered = Boolean(
     draft.profile.name.trim() && draft.profile.teamName.trim() &&
@@ -552,6 +642,83 @@ export default function ConceptStudioApp() {
       });
     if (index === 5) return draft.tools.selectedFeatures.length === 3 && draft.tools.plans.every((item) => item.reason && item.plan && item.planB) && Boolean(draft.tools.finalTitle);
     return Boolean(draft.final.purchasedIdea && draft.final.revision && draft.final.alignmentCheck);
+  };
+
+  const missingCountForStep = (index: number) => {
+    const missing = (values: unknown[]) => values.filter((value) =>
+      typeof value === "string" ? !value.trim() : !value,
+    ).length;
+    if (index === 0) return missing([
+      draft.goal.grade, draft.profile.subject, draft.goal.unit,
+      draft.goal.standard, draft.goal.currentGoal, draft.goal.selectedGoal,
+    ]);
+    if (index === 1) return missing([draft.lens.selected]);
+    if (index === 2) return missing([
+      draft.concept.generalization1, draft.concept.generalization2,
+      draft.concept.factual, draft.concept.conceptual, draft.concept.debatable,
+    ]);
+    if (index === 3) return missing([
+      draft.grasps.goal, draft.grasps.role, draft.grasps.audience,
+      draft.grasps.situation, draft.grasps.product, draft.grasps.standards,
+    ]);
+    if (index === 4) {
+      const stageMissing = draft.inquiry.stages.reduce((total, item) =>
+        total + missing([item.activity, item.strategy]), 0);
+      const checkMissing = WHERETO.reduce((total, [key]) => {
+        const check = draft.inquiry.whereto[key];
+        return total + (!check || check.score < 0 || (check.score > 0 && !check.evidence.trim()) ? 1 : 0);
+      }, 0);
+      return stageMissing + checkMissing;
+    }
+    if (index === 5) {
+      const featureMissing = Math.max(0, 3 - draft.tools.selectedFeatures.length);
+      const planMissing = draft.tools.plans.reduce((total, item) =>
+        total + missing([item.reason, item.plan, item.planB]), 0);
+      return featureMissing + planMissing + missing([draft.tools.finalTitle]);
+    }
+    return missing([draft.final.purchasedIdea, draft.final.revision, draft.final.alignmentCheck]);
+  };
+
+  const retrySave = async () => {
+    const next = { ...draft, currentStep: step, updatedAt: new Date().toISOString() };
+    setSaveState("saving");
+    try {
+      await persistDraft(next);
+      setLastSavedAt(next.updatedAt);
+      setSaveState("saved");
+    } catch (error) {
+      console.error("Manual save retry failed.", error);
+      setSaveState("error");
+    }
+  };
+
+  const toggleConceptGuide = (index: number) => {
+    setExpandedGuides((current) => {
+      const next = { ...current, [index]: !current[index] };
+      localStorage.setItem("concept_studio_guide_state_v1", JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const startPresentationMode = async () => {
+    if (!selectedRepresentativeId && representatives[0]) {
+      setSelectedRepresentativeId(representatives[0].id);
+    }
+    setPresentationMode(true);
+    try {
+      await document.documentElement.requestFullscreen?.();
+    } catch {
+      // 브라우저가 전체화면을 막아도 발표 전용 레이아웃은 유지합니다.
+    }
+  };
+
+  const exitPresentationMode = async () => {
+    setPresentationMode(false);
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+    } catch {
+      // 이미 전체화면이 종료된 경우에는 레이아웃만 복원합니다.
+    }
   };
 
   const goNext = async () => {
@@ -1036,11 +1203,12 @@ export default function ConceptStudioApp() {
 
   const renderConceptGuide = (index: number) => {
     const guide = STEP_GUIDES[index];
-    return <section className="concept-guide">
-      <div className="concept-guide-heading"><span>먼저 알아둘 개념</span><h2>{guide.title}</h2><p>{guide.summary}</p></div>
-      <div className="concept-guide-grid">{guide.items.map(([term, description]) =>
+    const expanded = Boolean(expandedGuides[index]);
+    return <section className={`concept-guide ${expanded ? "expanded" : "collapsed"}`}>
+      <div className="concept-guide-heading"><div><span>먼저 알아둘 개념</span><h2>{guide.title}</h2><p>{guide.summary}</p></div><button type="button" aria-expanded={expanded} onClick={() => toggleConceptGuide(index)}>{expanded ? "간단히 보기 ↑" : "개념 안내 자세히 보기 ↓"}</button></div>
+      {expanded && <div className="concept-guide-grid">{guide.items.map(([term, description]) =>
         <article key={term}><b>{term}</b><p>{description}</p></article>
-      )}</div>
+      )}</div>}
     </section>;
   };
 
@@ -1197,21 +1365,32 @@ export default function ConceptStudioApp() {
     </div>
   );
 
-  const renderDesign = () => (
-    <div className="workspace-layout">
+  const renderDesign = () => {
+    const missingCount = missingCountForStep(step);
+    const savedTime = lastSavedAt
+      ? new Date(lastSavedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+      : "";
+    const saveLabel = saveState === "saving"
+      ? "저장 중…"
+      : saveState === "saved"
+        ? "저장됨 ✓"
+        : saveState === "error"
+          ? "저장 실패"
+          : ready ? "자동 저장 준비" : "불러오는 중";
+    return <div className="workspace-layout">
       <aside className="step-sidebar">
         <div className="participant-mini"><span>{draft.profile.name.slice(0, 1) || "?"}</span><div><b>{draft.profile.name || "참여자"}</b><small>{draft.profile.teamName} · {draft.profile.subject}</small></div></div>
         <div className="sidebar-progress"><div><span>설계 진행률</span><b>{completedCount}/7</b></div><div><span style={{ width: `${completedCount / 7 * 100}%` }} /></div></div>
         <ol>{STEP_META.map(([num, title], index) => <li key={num}><button className={`${step === index ? "active" : ""} ${index < completedCount ? "done" : ""}`} onClick={() => setStep(index)}><span>{index < completedCount ? "✓" : num}</span><b>{title}</b></button></li>)}</ol>
         <button className="sidebar-link" onClick={() => setView("team")}>모둠평가실 <span>↗</span></button>
         <button className="sidebar-link showcase" onClick={() => setView("showcase")}>대표안 발표 <span>↗</span></button>
-        <small className="autosave">{ready ? "입력 내용 자동 저장 중" : "불러오는 중"}</small>
+        <small className={`autosave ${saveState}`}>{saveLabel}{savedTime && saveState === "saved" ? ` · ${savedTime}` : ""}</small>
       </aside>
       <section className="workspace-main">{renderStepHeader()}{step === 0 && renderGoalStep()}{step === 1 && renderLensStep()}{step === 2 && renderConceptStep()}{step === 3 && renderGraspsStep()}{step === 4 && renderInquiryStep()}{step === 5 && renderToolsStep()}{step === 6 && renderFinalStep()}
-        <div className="step-actions"><button className="secondary-btn" disabled={step === 0} onClick={() => setStep((current) => Math.max(0, current - 1))}>← 이전 단계</button><button className="primary-btn" onClick={goNext}>{step === 4 ? "개인 설계 제출하고 모둠평가실 열기" : step === 6 ? "최종 설계안 완성" : "저장하고 다음 단계"} <span>→</span></button></div>
+        <div className="step-actions"><button className="secondary-btn" disabled={step === 0} onClick={() => { setStep((current) => Math.max(0, current - 1)); window.scrollTo({ top: 0, behavior: "smooth" }); }}>← 이전 단계</button><div className={`sticky-save-status ${saveState}`}>{saveState === "error" ? <button type="button" onClick={retrySave}>저장 실패 · 다시 시도</button> : <><b>{saveLabel}</b>{savedTime && <small>마지막 저장 {savedTime}</small>}</>}<span className={missingCount ? "missing" : "complete"}>{missingCount ? `필수 항목 ${missingCount}개 남음` : "현재 단계 필수 항목 완료"}</span></div><button className="primary-btn" onClick={goNext}>{step === 4 ? "개인 설계 제출하고 모둠평가실 열기" : step === 6 ? "최종 설계안 완성" : "다음 단계"} <span>→</span></button></div>
       </section>
-    </div>
-  );
+    </div>;
+  };
 
   const renderTeam = () => {
     const reviewsOpen = controls ? Boolean(controls.reviewsOpen) : true;
@@ -1221,17 +1400,40 @@ export default function ConceptStudioApp() {
     ).length;
     const allReviewsComplete = teamRecords.length >= 3 &&
       teamRecords.every((participant) => scoreFor(participant.id).count >= 2);
+    const teamProgressRows = [
+      ...teamRecords.map((member) => {
+        const submitted = hasInquirySubmission(teamDesigns.find((design) => design.id === member.id));
+        const reviewCount = reviews.filter((review) => recordString(review, "reviewerId") === member.id).length;
+        return {
+          id: member.id,
+          name: recordString(member, "name"),
+          isMe: member.id === draft.ownerId,
+          connected: true,
+          submitted,
+          reviewCount,
+          status: !submitted ? "작성 중" : reviewCount >= 2 ? "완료" : reviewCount > 0 ? "평가 중" : "평가 대기",
+          statusKey: !submitted ? "writing" : reviewCount >= 2 ? "done" : reviewCount > 0 ? "reviewing" : "waiting",
+        };
+      }),
+      ...expectedNames.filter((name) =>
+        !teamRecords.some((member) => recordString(member, "name").trim() === name.trim()),
+      ).map((name) => ({
+        id: `expected-${name}`,
+        name,
+        isMe: false,
+        connected: false,
+        submitted: false,
+        reviewCount: 0,
+        status: "접속 대기",
+        statusKey: "offline",
+      })),
+    ];
     return <section className="page-container">
       <div className="page-hero team-hero"><div><span className="eyebrow">3인 모둠 협력</span><h1>WHERETO 동료평가실</h1><p>개인 설계를 제출한 뒤 자기 자신을 제외한 두 명의 설계안을 각각 확인하고 7개 기준으로 평가합니다.</p></div><div className="team-code"><small>모둠명</small><b>{draft.profile.teamName || "-"}</b><span>{submittedCount}/3명 개인 설계 제출</span></div></div>
       {!registered ? <EmptyState title="모둠 정보가 필요합니다." text="첫 화면에서 이름과 모둠 정보를 먼저 입력하세요." action={() => setView("home")} actionLabel="시작 화면으로 이동" /> :
       <>
         <div className="room-status"><span className={reviewsOpen ? "open" : "closed"}>{reviewsOpen ? "평가 가능" : "강사가 평가를 마감했습니다"}</span><b>{submittedCount}/3명 제출 · {teamRecords.length}/3명 접속</b><button className="mini-btn" onClick={refreshTeam}>새로고침</button></div>
-        <div className="expected-members"><b>등록한 모둠원</b>{expectedNames.map((name) => <span key={name}>{name}</span>)}</div>
-        <div className="member-grid">{teamRecords.map((member) => {
-          const score = scoreFor(member.id);
-          const submitted = hasInquirySubmission(teamDesigns.find((design) => design.id === member.id));
-          return <article className={`member-card ${member.id === draft.ownerId ? "me" : ""}`} key={member.id}><span className="avatar">{recordString(member, "name").slice(0, 1)}</span><div><b>{recordString(member, "name")}{member.id === draft.ownerId ? " · 나" : ""}</b><small>{submitted ? "개인 설계 제출 완료" : "작성 중"}</small></div><div className="score-pill">{score.count ? `${score.average.toFixed(1)}점` : "평가 대기"}<small>{score.count}/2명</small></div></article>;
-        })}</div>
+        <section className="team-progress-board"><div className="team-progress-heading"><div><span className="eyebrow">TEAM PROGRESS</span><h2>모둠원 진행 상황</h2></div><small>누구의 제출과 평가를 기다리고 있는지 확인하세요.</small></div><div className="team-progress-table"><div className="team-progress-header"><span>모둠원</span><span>설계 제출</span><span>동료평가</span><span>현재 상태</span></div>{teamProgressRows.map((member) => <article className={`${member.isMe ? "me" : ""} ${!member.connected ? "offline" : ""}`} key={member.id}><div className="team-member-name"><span>{member.name.slice(0, 1) || "?"}</span><b>{member.name}{member.isMe ? " · 나" : ""}</b></div><div><b className={member.submitted ? "status-done" : "status-wait"}>{member.submitted ? "완료" : member.connected ? "작성 중" : "대기"}</b></div><div><strong>{member.reviewCount}/2</strong></div><div><em className={`progress-status ${member.statusKey}`}>{member.status}</em></div></article>)}</div></section>
         {!allTeamSubmitted && <section className="waiting-workspace"><div className="waiting-banner"><span>동료 제출 대기 중</span><div><h2>기다리는 동안 Step 6을 먼저 작성하세요.</h2><p>세 명의 개인 설계가 모두 제출되면 알림창이 열리고 WHERETO 동료평가로 바로 안내합니다.</p></div></div>{renderToolsStep()}</section>}
         {teamRecords.filter((member) => member.id !== draft.ownerId).map((target) => {
           const design = teamDesigns.find((item) => item.id === target.id);
@@ -1259,9 +1461,16 @@ export default function ConceptStudioApp() {
   const renderShowcase = () => {
     const selected = representatives.find((item) => item.id === selectedRepresentativeId) || representatives[0];
     const stages = ((selected?.stages || []) as Array<Record<string, unknown>>);
+    const selectedIndex = Math.max(0, representatives.findIndex((item) => item.id === selected?.id));
+    const movePresentation = (direction: number) => {
+      if (!representatives.length) return;
+      const nextIndex = (selectedIndex + direction + representatives.length) % representatives.length;
+      setSelectedRepresentativeId(representatives[nextIndex].id);
+    };
     return <section className="page-container showcase-page">
-      <div className="page-hero showcase-hero"><div><span className="eyebrow">ONE PAGE PRESENTATION</span><h1>모둠 대표안 발표</h1><p>WHERETO 동료평가로 선정된 각 모둠의 대표 교수학습설계안을 한 장씩 넘겨 보며 발표합니다.</p></div><div className="hero-actions"><button className="secondary-btn" onClick={refreshShowcase}>대표안 새로고침</button>{auctionReady && <button className="primary-btn" onClick={() => setView("auction")}>경매 현황으로 이동 →</button>}</div></div>
+      <div className="page-hero showcase-hero"><div><span className="eyebrow">ONE PAGE PRESENTATION</span><h1>모둠 대표안 발표</h1><p>WHERETO 동료평가로 선정된 각 모둠의 대표 교수학습설계안을 한 장씩 넘겨 보며 발표합니다.</p></div><div className="hero-actions"><button className="secondary-btn" onClick={refreshShowcase}>대표안 새로고침</button>{representatives.length > 0 && <button className="secondary-btn presentation-start" onClick={startPresentationMode}>발표 모드 시작 ⛶</button>}{auctionReady && <button className="primary-btn" onClick={() => setView("auction")}>경매 현황으로 이동 →</button>}</div></div>
       {representatives.length === 0 ? <EmptyState title="아직 확정된 모둠 대표안이 없습니다." text="모둠평가실에서 세 명의 상호평가를 마치고 대표안을 확정하세요." action={() => setView("team")} actionLabel="모둠평가실 이동" /> : <>
+        {presentationMode && <div className="showcase-presenter-controls"><button onClick={() => movePresentation(-1)} aria-label="이전 모둠">←</button><div><b>{recordString(selected, "teamName")}</b><span>{selectedIndex + 1} / {representatives.length} 모둠</span><small>← → 방향키로 이동 · Esc로 종료</small></div><button onClick={() => movePresentation(1)} aria-label="다음 모둠">→</button><button className="presentation-exit" onClick={exitPresentationMode}>발표 모드 종료</button></div>}
         <div className="showcase-tabs">{representatives.map((item) => <button className={selected?.id === item.id ? "active" : ""} key={item.id} onClick={() => setSelectedRepresentativeId(item.id)}><b>{recordString(item, "teamName")}</b><small>{recordString(item, "ownerName")} 선생님</small></button>)}</div>
         {selected && <article className="presentation-sheet">
           <header><div><span>{recordString(selected, "teamName")} · 모둠 대표안</span><h2>{recordString(selected, "title")}</h2><p>{recordString(selected, "ownerName")} 선생님 · {recordString(selected, "subject")} · {recordString(selected, "grade")}</p></div><strong>{Number(selected.wheretoAverage || 0).toFixed(1)}<small>WHERETO 평균</small></strong></header>
@@ -1292,12 +1501,14 @@ export default function ConceptStudioApp() {
     return <section className="page-container auction-status-page">
       <div className="page-hero auction-status-hero"><div><span className="eyebrow">LIVE IDEA AUCTION</span><h1>경매 현황 게시판</h1><p>{scoreDetailsVisible ? "관리자가 세부 결과를 공개했습니다. 낙찰 토큰과 최종 점수를 함께 확인하세요." : "낙찰 현황과 실시간 순위만 공개됩니다. 토큰과 세부 점수는 관리자가 결과를 공개한 뒤 확인할 수 있습니다."}</p></div><div className="auction-live-count"><b>{completedResults.length}</b><span>/ 6개 결과 입력</span><small>{adminLoggedIn ? "관리자 기록 모드" : scoreDetailsVisible ? "세부 결과 공개" : "순위만 공개"}</small></div></div>
       {!auctionReady ? <EmptyState title="대표안 선정을 기다리고 있습니다." text={`현재 ${representatives.length}/6개 모둠의 대표안이 확정되었습니다. 6개가 모두 선정되면 경매 현황이 열립니다.`} action={() => setView("showcase")} actionLabel="대표안 발표 화면" /> : <>
+        {!scoreDetailsVisible && <section className="score-hidden-notice"><span>🔒</span><div><b>현재는 순위와 낙찰 모둠만 공개됩니다.</b><p>토큰 수, WHERETO 점수, 최종 점수는 관리자가 최종 결과를 공개한 뒤 표시됩니다.</p></div></section>}
         {scoreDetailsVisible && <section className="auction-formula"><b>모둠 총점 계산</b><span>자기 모둠 발표안 WHERETO 종합점수</span><i>+</i><span>낙찰받은 발표안의 점수 합계</span><small>낙찰 발표안 점수 = 해당 발표안 WHERETO 종합점수 × 낙찰 토큰</small></section>}
         <div className="auction-result-grid">{representatives.map((representative, index) => {
           const result = auctionResults.find((item) => recordString(item, "representativeId") === representative.id);
           const baseScore = representativeBaseScore(representative);
           const tokens = Number(result?.tokens || 0);
           const finalScore = baseScore * tokens;
+          const recentlyUpdated = Boolean(result && newAuctionResultIds.includes(result.id));
           const content = <>
             <div className="auction-result-head"><span>{index + 1}</span><div><b>{recordString(representative, "teamName")} 발표안</b><small>{recordString(representative, "ownerName")} 선생님{scoreDetailsVisible ? ` · WHERETO 종합 ${baseScore}점` : ""}</small></div><em className={result ? "sold" : "pending"}>{result ? "낙찰 완료" : "결과 대기"}</em></div>
             {result ? scoreDetailsVisible
@@ -1306,10 +1517,13 @@ export default function ConceptStudioApp() {
               : <div className="auction-result-waiting"><span>관리자 입력 대기 중</span><small>발표와 현장 경매가 끝나면 결과가 이곳에 바로 표시됩니다.</small></div>}
           </>;
           return adminLoggedIn
-            ? <button className={`auction-result-card admin-selectable ${result ? "completed" : ""}`} key={representative.id} onClick={() => openAuctionRecord(representative)}>{content}<span className="admin-edit-hint">{result ? "결과 수정" : "낙찰 결과 입력"} →</span></button>
-            : <article className={`auction-result-card ${result ? "completed" : ""}`} key={representative.id}>{content}</article>;
+            ? <button className={`auction-result-card admin-selectable ${result ? "completed" : ""} ${recentlyUpdated ? "recently-updated" : ""}`} key={representative.id} onClick={() => openAuctionRecord(representative)}>{content}<span className="admin-edit-hint">{result ? "결과 수정" : "낙찰 결과 입력"} →</span></button>
+            : <article className={`auction-result-card ${result ? "completed" : ""} ${recentlyUpdated ? "recently-updated" : ""}`} key={representative.id}>{content}</article>;
         })}</div>
-        <section className="scoreboard-panel"><div className="section-heading"><span className="eyebrow">{scoreDetailsVisible ? "SCORE REVEALED" : "LIVE RANKING"}</span><h2>{scoreDetailsVisible ? "모둠 최종 순위와 점수" : "실시간 모둠 순위"}</h2><p>{scoreDetailsVisible ? "자기 모둠 발표안 점수와 낙찰받은 발표안 점수를 합산한 결과입니다." : "점수와 토큰은 가리고 현재 순위만 보여줍니다. 관리자가 결과를 공개하면 세부 점수가 표시됩니다."}</p></div><div className={`scoreboard-table ${scoreDetailsVisible ? "" : "rank-only"}`}>{teamStandings.map((team, index) => <article className={team.teamName === draft.profile.teamName ? "my-team" : ""} key={team.teamName}><span className="score-rank">{index + 1}</span><div className="score-team"><b>{team.teamName}</b><small>{team.teamName === draft.profile.teamName ? "나의 모둠" : "현재 순위"}</small></div>{scoreDetailsVisible && <><div><small>자기 발표안</small><b>{team.ownScore}</b></div><i>+</i><div><small>낙찰 점수</small><b>{team.purchaseScore}</b></div><strong>{team.total}<small>점</small></strong><div className="token-remaining"><small>토큰</small><b>{team.tokensSpent}/7</b></div></>}</article>)}</div></section>
+        <section className="scoreboard-panel"><div className="section-heading"><span className="eyebrow">{scoreDetailsVisible ? "SCORE REVEALED" : "LIVE RANKING"}</span><h2>{scoreDetailsVisible ? "모둠 최종 순위와 점수" : "실시간 모둠 순위"}</h2><p>{scoreDetailsVisible ? "자기 모둠 발표안 점수와 낙찰받은 발표안 점수를 합산한 결과입니다." : "점수와 토큰은 가리고 현재 순위만 보여줍니다. 관리자가 결과를 공개하면 세부 점수가 표시됩니다."}</p></div><div className={`scoreboard-table ${scoreDetailsVisible ? "" : "rank-only"}`}>{teamStandings.map((team, index) => {
+          const movement = Number(rankChanges[team.teamName] || 0);
+          return <article className={team.teamName === draft.profile.teamName ? "my-team" : ""} key={team.teamName}><span className="score-rank">{index + 1}</span><div className="score-team"><b>{team.teamName}</b><small>{team.teamName === draft.profile.teamName ? "나의 모둠" : "현재 순위"}</small></div>{!scoreDetailsVisible && <span className={`rank-movement ${movement > 0 ? "up" : movement < 0 ? "down" : "steady"}`}>{movement > 0 ? `▲ ${movement}단계` : movement < 0 ? `▼ ${Math.abs(movement)}단계` : "변동 없음"}</span>}{scoreDetailsVisible && <><div><small>자기 발표안</small><b>{team.ownScore}</b></div><i>+</i><div><small>낙찰 점수</small><b>{team.purchaseScore}</b></div><strong>{team.total}<small>점</small></strong><div className="token-remaining"><small>토큰</small><b>{team.tokensSpent}/7</b></div></>}</article>;
+        })}</div></section>
       </>}
       {adminLoggedIn && selectedAuction && <div className="prompt-backdrop" onMouseDown={() => setSelectedAuctionId("")}><section className="auction-admin-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setSelectedAuctionId("")}>×</button><span className="eyebrow">AUCTION RESULT ENTRY</span><h2>{recordString(selectedAuction, "teamName")} 대표 교수학습설계안</h2><p className="auction-modal-lead">발표 내용을 확인한 뒤 낙찰 모둠과 토큰을 입력하세요. 저장 즉시 참여자 게시판이 갱신됩니다.</p>
         <div className="auction-detail-grid">
@@ -1353,7 +1567,7 @@ export default function ConceptStudioApp() {
     const adminReviewsOpen = controls ? Boolean(controls.reviewsOpen) : true;
     const scoresRevealed = Boolean(controls?.scoresRevealed);
     if (!adminLoggedIn) return <section className="admin-login-page"><form className="admin-login-card" onSubmit={loginAdmin}><span className="brand-mark">C</span><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>연수 진행 상태, 개인 설계 제출, 동료평가와 모둠 대표안을 확인합니다.</p><label>강사 이메일<input type="email" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} placeholder={store?.config.adminEmail || "teacher@example.com"} /></label><label>비밀번호<input type="password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} placeholder={store?.mode === "local" ? "데모 비밀번호 1234" : "Firebase 강사 계정 비밀번호"} /></label><button className="primary-btn full" disabled={busy}>{busy ? "확인 중..." : "관제실 입장"}</button></form></section>;
-    return <section className="page-container admin-page"><div className="page-hero admin-hero"><div><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>개인 설계 제출, 모둠별 상호평가, 대표안 선정과 경매 결과를 관리합니다.</p></div><button className="secondary-btn" onClick={async () => { await store?.logoutAdmin(); setAdminLoggedIn(false); }}>로그아웃</button></div>
+    return <section className="page-container admin-page"><div className="page-hero admin-hero"><div><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>개인 설계 제출, 모둠별 상호평가, 대표안 선정과 경매 결과를 관리합니다.</p></div><div className="admin-hero-actions"><button className="secondary-btn" onClick={() => setView("home")}>참여자 화면으로</button><button className="secondary-btn" onClick={async () => { await store?.logoutAdmin(); setAdminLoggedIn(false); }}>로그아웃</button></div></div>
       <div className="admin-stats"><article><small>참여자</small><b>{participantCount}</b><span>명</span></article><article><small>모둠</small><b>{teamCount}</b><span>개</span></article><article><small>Step 5 제출</small><b>{inquirySubmitted}</b><span>명</span></article><article><small>동료평가</small><b>{reviews.length}</b><span>건</span></article><article><small>대표안</small><b>{representatives.length}</b><span>/6</span></article><article><small>낙찰 결과</small><b>{auctionResults.length}</b><span>/6</span></article></div>
       <section className="control-panel"><div><span className="eyebrow">LIVE CONTROL</span><h2>평가·경매 진행 제어</h2><p>관리자의 변경 사항은 참여자 화면에 즉시 반영됩니다.</p></div><div className="control-buttons"><button className={adminReviewsOpen ? "on" : ""} onClick={() => saveControls({ reviewsOpen: !adminReviewsOpen })}><span>WHERETO 평가</span><b>{adminReviewsOpen ? "진행 중" : "마감"}</b></button><button className={auctionReady ? "reveal" : ""} disabled={!auctionReady} onClick={() => setView("auction")}><span>경매 현황</span><b>{auctionReady ? "관리자 입력 화면 열기" : `대표안 ${representatives.length}/6`}</b></button><button className={scoresRevealed ? "on" : ""} disabled={!auctionReady} onClick={() => saveControls({ scoresRevealed: !scoresRevealed })}><span>참여자 세부 점수</span><b>{scoresRevealed ? "공개 중 · 다시 숨기기" : "최종 결과 공개"}</b></button></div></section>
       <section className="control-panel"><div><span className="eyebrow">SAFE TEST MODE</span><h2>경매 기능 빠른 테스트</h2><p>실제 참여자 자료와 분리된 6개 모둠 대표안을 생성합니다. 테스트가 끝나면 테스트 자료만 한 번에 삭제할 수 있습니다.</p></div><div className="control-buttons"><button className="reveal" disabled={busy} onClick={createAuctionTestData}><span>테스트 데이터</span><b>{busy ? "처리 중..." : "6모둠 생성"}</b></button><button disabled={busy || !representatives.some((item) => Boolean(item.isTestData))} onClick={deleteAuctionTestData}><span>테스트 종료</span><b>데이터 삭제</b></button></div></section>
@@ -1377,9 +1591,10 @@ export default function ConceptStudioApp() {
   };
 
   return (
-    <main className={`app-shell view-${view}`}>
+    <main className={`app-shell view-${view} ${presentationMode ? "presentation-mode" : ""} ${view === "admin" ? "admin-mode" : ""}`}>
       <header className="topbar no-print">
         <button className="brand" onClick={() => navTo("home")} aria-label="홈"><span className="brand-mark">C</span><span><b>Concept Studio</b><small>개념 기반 교수학습 설계</small></span></button>
+        {view === "admin" && <span className="admin-mode-badge">관리자 모드</span>}
         <nav aria-label="주요 메뉴">
           <button className={`nav-link ${view === "design" ? "active" : ""}`} onClick={() => navTo("design")}>설계하기</button>
           <button className={`nav-link ${view === "team" ? "active" : ""}`} onClick={() => navTo("team")}>모둠평가</button>
