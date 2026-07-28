@@ -8,6 +8,7 @@ import {
 } from "firebase/auth";
 import {
   collection,
+  deleteDoc,
   doc,
   getDocs,
   getFirestore,
@@ -46,6 +47,7 @@ export interface DataStore {
   config: AppConfig;
   uid(): string;
   set(collectionName: string, id: string, value: PlainRecord): Promise<void>;
+  remove(collectionName: string, id: string): Promise<void>;
   all(collectionName: string): Promise<Array<PlainRecord & { id: string }>>;
   subscribe(collectionName: string, onChange: (records: Array<PlainRecord & { id: string }>) => void): () => void;
   loginAdmin(email: string, password: string): Promise<void>;
@@ -94,6 +96,15 @@ class LocalStore implements DataStore {
     window.dispatchEvent(new Event("concept-store-change"));
   }
 
+  async remove(collectionName: string, id: string) {
+    const db = readLocalDb();
+    if (db[collectionName]) {
+      delete db[collectionName][id];
+      writeLocalDb(db);
+      window.dispatchEvent(new Event("concept-store-change"));
+    }
+  }
+
   async all(collectionName: string) {
     const group = readLocalDb()[collectionName] || {};
     return Object.entries(group).map(([id, value]) => ({ id, ...value }));
@@ -137,6 +148,10 @@ class FirebaseStore implements DataStore {
 
   async set(collectionName: string, id: string, value: PlainRecord) {
     await setDoc(doc(this.db, collectionName, id), value, { merge: true });
+  }
+
+  async remove(collectionName: string, id: string) {
+    await deleteDoc(doc(this.db, collectionName, id));
   }
 
   async all(collectionName: string) {

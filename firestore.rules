@@ -95,10 +95,11 @@ service cloud.firestore {
 
     match /conceptRepresentatives/{representativeId} {
       allow read: if signedIn();
-      allow create, update: if isMemberOf(
-        request.resource.data.teamName,
-        request.resource.data.sessionCode
-      );
+      allow create, update: if isConceptAdmin()
+        || isMemberOf(
+          request.resource.data.teamName,
+          request.resource.data.sessionCode
+        );
       allow delete: if isConceptAdmin();
     }
 

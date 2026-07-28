@@ -831,6 +831,89 @@ export default function ConceptStudioApp() {
     setControls(allControls.find((item) => item.id === session) || null);
   }
 
+  const createAuctionTestData = async () => {
+    if (!store || !adminLoggedIn || busy) return;
+    const sessionCode = draft.profile.sessionCode || store.config.sessionId || "concept-workshop-2026";
+    const lenses = ["변화", "관계", "체계", "상호의존", "관점", "지속가능성"];
+    const subjects = ["국어", "수학", "사회", "과학", "영어", "예술"];
+    const peerScores = [22, 24, 25, 26, 27, 28];
+    setBusy(true);
+    try {
+      await Promise.all(Array.from({ length: 6 }, async (_, index) => {
+        const number = index + 1;
+        const id = `${safeId(sessionCode)}__auction-test-${number}`;
+        const teamName = `${number}모둠`;
+        const lens = lenses[index];
+        const subject = subjects[index];
+        await store.set("conceptRepresentatives", id, {
+          sessionCode,
+          teamName,
+          ownerId: `auction-test-owner-${number}`,
+          ownerName: `테스트 교사 ${number}`,
+          subject,
+          grade: "중·고등학교",
+          unit: `${subject} 개념 탐구 단원`,
+          title: `[테스트] ${lens}의 렌즈로 다시 보는 ${subject} 수업`,
+          selectedGoal: `학습한 개념의 관계를 설명하고 새로운 상황에 적용하여 해결 방안을 제안할 수 있다.`,
+          lens,
+          lensReason: `${lens}의 관점이 단편적인 사실을 연결하고 새로운 맥락으로 전이하는 데 적합하기 때문이다.`,
+          generalization1: `개념 간의 관계는 현상을 해석하는 관점을 형성한다.`,
+          generalization2: `근거를 바탕으로 구성한 이해는 새로운 상황의 문제 해결에 전이된다.`,
+          factualQuestion: `이 단원에서 확인해야 할 핵심 사실과 사례는 무엇인가?`,
+          conceptualQuestion: `${lens}은 현상을 이해하는 방식에 어떻게 영향을 주는가?`,
+          debatableQuestion: `새로운 문제를 해결할 때 하나의 관점만으로 충분한가?`,
+          performanceTask: `G 실제 문제 해결 · R 분야 전문가 · A 학교 공동체 · S 새로운 상황과 제약 조건 · P 해결안 발표 자료 · S 개념 관계, 탐구 근거, 전이 적용, 의사소통`,
+          scenario: `나는 학교 공동체의 문제 해결 전문가로서 여러 자료를 분석하고, 핵심 개념의 관계를 새로운 상황에 적용한 해결안을 제안한다.`,
+          successStandards: `개념 관계의 정확성, 근거의 타당성, 새로운 상황으로의 전이, 명료한 의사소통`,
+          stages: INQUIRY_STAGES.map(([key, title], stageIndex) => ({
+            key,
+            title,
+            activity: `${stageIndex + 1}단계 테스트 학생 활동`,
+            strategy: `${lens} 중심 탐구 전략`,
+          })),
+          wheretoAverage: Number((peerScores[index] / 2).toFixed(1)),
+          selfWheretoScore: 12,
+          peerScoreTotal: peerScores[index],
+          wheretoTotal: 12 + peerScores[index],
+          isTestData: true,
+          submittedAt: new Date().toISOString(),
+        });
+      }));
+      await refreshAdmin();
+      showToast("6개 모둠의 경매 테스트 대표안을 생성했습니다.");
+    } catch (error) {
+      console.error(error);
+      showToast("테스트 데이터 생성에 실패했습니다. Firestore 규칙을 확인해 주세요.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteAuctionTestData = async () => {
+    if (!store || !adminLoggedIn || busy) return;
+    const testRepresentatives = representatives.filter((item) => Boolean(item.isTestData));
+    if (!testRepresentatives.length) {
+      showToast("삭제할 경매 테스트 데이터가 없습니다.");
+      return;
+    }
+    if (!window.confirm("테스트 대표안과 해당 낙찰 결과만 삭제할까요? 실제 연수 자료는 유지됩니다.")) return;
+    setBusy(true);
+    try {
+      await Promise.all(testRepresentatives.flatMap((item) => [
+        store.remove("conceptAuctionResults", item.id),
+        store.remove("conceptRepresentatives", item.id),
+      ]));
+      setSelectedAuctionId("");
+      await refreshAdmin();
+      showToast("경매 테스트 데이터만 삭제했습니다.");
+    } catch (error) {
+      console.error(error);
+      showToast("테스트 데이터 삭제에 실패했습니다.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const loginAdmin = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!store) return;
@@ -1260,6 +1343,7 @@ export default function ConceptStudioApp() {
     return <section className="page-container admin-page"><div className="page-hero admin-hero"><div><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>개인 설계 제출, 모둠별 상호평가, 대표안 선정과 경매 결과를 관리합니다.</p></div><button className="secondary-btn" onClick={async () => { await store?.logoutAdmin(); setAdminLoggedIn(false); }}>로그아웃</button></div>
       <div className="admin-stats"><article><small>참여자</small><b>{participantCount}</b><span>명</span></article><article><small>모둠</small><b>{teamCount}</b><span>개</span></article><article><small>Step 5 제출</small><b>{inquirySubmitted}</b><span>명</span></article><article><small>동료평가</small><b>{reviews.length}</b><span>건</span></article><article><small>대표안</small><b>{representatives.length}</b><span>/6</span></article><article><small>낙찰 결과</small><b>{auctionResults.length}</b><span>/6</span></article></div>
       <section className="control-panel"><div><span className="eyebrow">LIVE CONTROL</span><h2>평가·경매 진행 제어</h2><p>관리자의 변경 사항은 참여자 화면에 즉시 반영됩니다.</p></div><div className="control-buttons"><button className={adminReviewsOpen ? "on" : ""} onClick={() => saveControls({ reviewsOpen: !adminReviewsOpen })}><span>WHERETO 평가</span><b>{adminReviewsOpen ? "진행 중" : "마감"}</b></button><button className={auctionReady ? "reveal" : ""} disabled={!auctionReady} onClick={() => setView("auction")}><span>경매 현황</span><b>{auctionReady ? "관리자 입력 화면 열기" : `대표안 ${representatives.length}/6`}</b></button></div></section>
+      <section className="control-panel"><div><span className="eyebrow">SAFE TEST MODE</span><h2>경매 기능 빠른 테스트</h2><p>실제 참여자 자료와 분리된 6개 모둠 대표안을 생성합니다. 테스트가 끝나면 테스트 자료만 한 번에 삭제할 수 있습니다.</p></div><div className="control-buttons"><button className="reveal" disabled={busy} onClick={createAuctionTestData}><span>테스트 데이터</span><b>{busy ? "처리 중..." : "6모둠 생성"}</b></button><button disabled={busy || !representatives.some((item) => Boolean(item.isTestData))} onClick={deleteAuctionTestData}><span>테스트 종료</span><b>데이터 삭제</b></button></div></section>
       <div className="admin-grid"><section className="admin-panel"><div className="panel-heading"><h2>참여자·설계 진행</h2><button className="mini-btn" onClick={refreshAdmin}>새로고침</button></div><div className="table-scroll"><table className="admin-table"><thead><tr><th>이름</th><th>교과군</th><th>교과</th><th>현재 단계</th><th>완성</th></tr></thead><tbody>{adminRecords.map((item) => { const design = teamDesigns.find((d) => d.id === item.id); return <tr key={item.id}><td>{recordString(item, "name")}</td><td>{recordString(item, "teamName")}</td><td>{recordString(item, "subject")}</td><td>Step {Number(design?.currentStep ?? 0) + 1}</td><td>{design?.completed ? "완료" : "진행 중"}</td></tr>})}</tbody></table></div></section>
       <section className="admin-panel"><div className="panel-heading"><h2>모둠 대표안</h2><button className="mini-btn" onClick={() => setView("showcase")}>한 장 발표 화면</button></div><div className="admin-ranking">{representatives.length ? representatives.map((item, index) => <article key={item.id}><span>{index + 1}</span><div><b>{recordString(item, "title")}</b><small>{recordString(item, "teamName")} · {recordString(item, "ownerName")}</small></div><strong>{representativeBaseScore(item)}<small>종합점</small></strong></article>) : <p className="empty-line">아직 확정된 대표안이 없습니다.</p>}</div></section></div>
     </section>;
