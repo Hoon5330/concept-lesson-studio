@@ -451,9 +451,13 @@ export default function ConceptStudioApp() {
     const unsubscribeAuction = store.subscribe("conceptAuctionResults", (records) => {
       setAuctionResults(records.filter((item) => recordString(item, "sessionCode") === session));
     });
+    const unsubscribeControls = store.subscribe("conceptControls", (records) => {
+      setControls(records.find((item) => item.id === session) || null);
+    });
     return () => {
       unsubscribeRepresentatives();
       unsubscribeAuction();
+      unsubscribeControls();
     };
   }, [store, draft.profile.sessionCode]);
 
@@ -941,6 +945,7 @@ export default function ConceptStudioApp() {
     }
     const next = {
       reviewsOpen: controls?.reviewsOpen ?? true,
+      scoresRevealed: controls?.scoresRevealed ?? false,
       ...patch,
       updatedAt: new Date().toISOString(),
     };
@@ -1263,7 +1268,10 @@ export default function ConceptStudioApp() {
           <section className="presentation-core"><article><span>학습 목표</span><p>{recordString(selected, "selectedGoal")}</p></article><article><span>개념적 렌즈</span><h3>{recordString(selected, "lens")}</h3><p>{recordString(selected, "unit")}</p></article></section>
           <section className="presentation-generalizations"><article><span>일반화 1</span><p>{recordString(selected, "generalization1")}</p></article><article><span>일반화 2</span><p>{recordString(selected, "generalization2")}</p></article></section>
           <section className="presentation-grid"><article><span>핵심 개념적 질문</span><p className="multiline">{recordString(selected, "conceptualQuestion")}</p><span>논쟁적 질문</span><p className="multiline">{recordString(selected, "debatableQuestion")}</p></article><article><span>GRASPS 수행과제</span><p>{recordString(selected, "performanceTask")}</p><span>성공 기준</span><p>{recordString(selected, "successStandards")}</p></article></section>
-          <section className="presentation-stages"><span>개념기반 탐구 7단계</span><div>{stages.map((item, index) => <article key={String(item.key || index)}><b>{index + 1}</b><h3>{String(item.title || "").replace(/^[①-⑦]\s/, "")}</h3><p>{String(item.activity || "")}</p></article>)}</div></section>
+          <section className="presentation-stages">
+            <div className="presentation-stages-heading"><div><span>LEARNING JOURNEY</span><h3>개념기반 탐구 7단계</h3></div><p>사실에서 출발해 일반화를 만들고 새로운 맥락으로 전이하는 학습의 흐름</p></div>
+            <ol>{stages.map((item, index) => <li key={String(item.key || index)}><div className="stage-card-number"><b>{String(index + 1).padStart(2, "0")}</b><span>{["ENGAGE", "FOCUS", "INVESTIGATE", "ORGANIZE", "GENERALIZE", "TRANSFER", "REFLECT"][index]}</span></div><h3>{String(item.title || "").replace(/^[①-⑦]\s/, "")}</h3><p>{String(item.activity || "주요 학생 활동을 확인하세요.")}</p></li>)}</ol>
+          </section>
         </article>}
       </>}
     </section>;
@@ -1280,24 +1288,28 @@ export default function ConceptStudioApp() {
     const selectedBuyerSpent = auctionResults
       .filter((item) => item.id !== selectedAuctionId && recordString(item, "buyerTeam") === auctionDraft.buyerTeam)
       .reduce((sum, item) => sum + Number(item.tokens || 0), 0);
+    const scoreDetailsVisible = adminLoggedIn || Boolean(controls?.scoresRevealed);
     return <section className="page-container auction-status-page">
-      <div className="page-hero auction-status-hero"><div><span className="eyebrow">LIVE IDEA AUCTION</span><h1>경매 현황 게시판</h1><p>관리자가 낙찰 결과를 저장하면 모든 참여자 화면에 낙찰 모둠, 토큰, 점수가 즉시 반영됩니다.</p></div><div className="auction-live-count"><b>{completedResults.length}</b><span>/ 6개 결과 입력</span><small>{adminLoggedIn ? "관리자 기록 모드" : "참여자 조회 전용"}</small></div></div>
+      <div className="page-hero auction-status-hero"><div><span className="eyebrow">LIVE IDEA AUCTION</span><h1>경매 현황 게시판</h1><p>{scoreDetailsVisible ? "관리자가 세부 결과를 공개했습니다. 낙찰 토큰과 최종 점수를 함께 확인하세요." : "낙찰 현황과 실시간 순위만 공개됩니다. 토큰과 세부 점수는 관리자가 결과를 공개한 뒤 확인할 수 있습니다."}</p></div><div className="auction-live-count"><b>{completedResults.length}</b><span>/ 6개 결과 입력</span><small>{adminLoggedIn ? "관리자 기록 모드" : scoreDetailsVisible ? "세부 결과 공개" : "순위만 공개"}</small></div></div>
       {!auctionReady ? <EmptyState title="대표안 선정을 기다리고 있습니다." text={`현재 ${representatives.length}/6개 모둠의 대표안이 확정되었습니다. 6개가 모두 선정되면 경매 현황이 열립니다.`} action={() => setView("showcase")} actionLabel="대표안 발표 화면" /> : <>
-        <section className="auction-formula"><b>모둠 총점 계산</b><span>자기 모둠 발표안 WHERETO 종합점수</span><i>+</i><span>낙찰받은 발표안의 점수 합계</span><small>낙찰 발표안 점수 = 해당 발표안 WHERETO 종합점수 × 낙찰 토큰</small></section>
+        {scoreDetailsVisible && <section className="auction-formula"><b>모둠 총점 계산</b><span>자기 모둠 발표안 WHERETO 종합점수</span><i>+</i><span>낙찰받은 발표안의 점수 합계</span><small>낙찰 발표안 점수 = 해당 발표안 WHERETO 종합점수 × 낙찰 토큰</small></section>}
         <div className="auction-result-grid">{representatives.map((representative, index) => {
           const result = auctionResults.find((item) => recordString(item, "representativeId") === representative.id);
           const baseScore = representativeBaseScore(representative);
           const tokens = Number(result?.tokens || 0);
           const finalScore = baseScore * tokens;
           const content = <>
-            <div className="auction-result-head"><span>{index + 1}</span><div><b>{recordString(representative, "teamName")} 발표안</b><small>{recordString(representative, "ownerName")} 선생님 · WHERETO 종합 {baseScore}점</small></div><em className={result ? "sold" : "pending"}>{result ? "낙찰 완료" : "결과 대기"}</em></div>
-            {result ? <div className="auction-result-live"><p><b>{recordString(representative, "teamName")}</b> 발표안이 <strong>{recordString(result, "buyerTeam")}</strong>에게</p><span><b>{tokens}</b>토큰에 낙찰</span><small>{baseScore}점 × {tokens}토큰 = <strong>{finalScore}점</strong></small></div> : <div className="auction-result-waiting"><span>관리자 입력 대기 중</span><small>발표와 현장 경매가 끝나면 결과가 이곳에 바로 표시됩니다.</small></div>}
+            <div className="auction-result-head"><span>{index + 1}</span><div><b>{recordString(representative, "teamName")} 발표안</b><small>{recordString(representative, "ownerName")} 선생님{scoreDetailsVisible ? ` · WHERETO 종합 ${baseScore}점` : ""}</small></div><em className={result ? "sold" : "pending"}>{result ? "낙찰 완료" : "결과 대기"}</em></div>
+            {result ? scoreDetailsVisible
+              ? <div className="auction-result-live"><p><b>{recordString(representative, "teamName")}</b> 발표안이 <strong>{recordString(result, "buyerTeam")}</strong>에게</p><span><b>{tokens}</b>토큰에 낙찰</span><small>{baseScore}점 × {tokens}토큰 = <strong>{finalScore}점</strong></small></div>
+              : <div className="auction-result-live auction-result-hidden"><p><b>{recordString(representative, "teamName")}</b> 발표안이</p><strong>{recordString(result, "buyerTeam")}</strong><span>에게 낙찰되었습니다</span><small>토큰과 세부 점수는 결과 공개 후 확인할 수 있습니다.</small></div>
+              : <div className="auction-result-waiting"><span>관리자 입력 대기 중</span><small>발표와 현장 경매가 끝나면 결과가 이곳에 바로 표시됩니다.</small></div>}
           </>;
           return adminLoggedIn
             ? <button className={`auction-result-card admin-selectable ${result ? "completed" : ""}`} key={representative.id} onClick={() => openAuctionRecord(representative)}>{content}<span className="admin-edit-hint">{result ? "결과 수정" : "낙찰 결과 입력"} →</span></button>
             : <article className={`auction-result-card ${result ? "completed" : ""}`} key={representative.id}>{content}</article>;
         })}</div>
-        <section className="scoreboard-panel"><div className="section-heading"><span className="eyebrow">{completedResults.length === 6 ? "FINAL SCORE" : "LIVE SCORE"}</span><h2>{completedResults.length === 6 ? "모둠 최종 순위" : "실시간 모둠 점수"}</h2><p>자기 모둠 발표안의 WHERETO 종합점수를 기본점수로 더한 결과입니다.</p></div><div className="scoreboard-table">{teamStandings.map((team, index) => <article className={team.teamName === draft.profile.teamName ? "my-team" : ""} key={team.teamName}><span className="score-rank">{index + 1}</span><div className="score-team"><b>{team.teamName}</b><small>{team.teamName === draft.profile.teamName ? "나의 모둠 · " : ""}{team.purchaseCount}개 발표안 낙찰</small></div><div><small>자기 발표안</small><b>{team.ownScore}</b></div><i>+</i><div><small>낙찰 점수</small><b>{team.purchaseScore}</b></div><strong>{team.total}<small>점</small></strong><div className="token-remaining"><small>토큰</small><b>{team.tokensSpent}/7</b></div></article>)}</div></section>
+        <section className="scoreboard-panel"><div className="section-heading"><span className="eyebrow">{scoreDetailsVisible ? "SCORE REVEALED" : "LIVE RANKING"}</span><h2>{scoreDetailsVisible ? "모둠 최종 순위와 점수" : "실시간 모둠 순위"}</h2><p>{scoreDetailsVisible ? "자기 모둠 발표안 점수와 낙찰받은 발표안 점수를 합산한 결과입니다." : "점수와 토큰은 가리고 현재 순위만 보여줍니다. 관리자가 결과를 공개하면 세부 점수가 표시됩니다."}</p></div><div className={`scoreboard-table ${scoreDetailsVisible ? "" : "rank-only"}`}>{teamStandings.map((team, index) => <article className={team.teamName === draft.profile.teamName ? "my-team" : ""} key={team.teamName}><span className="score-rank">{index + 1}</span><div className="score-team"><b>{team.teamName}</b><small>{team.teamName === draft.profile.teamName ? "나의 모둠" : "현재 순위"}</small></div>{scoreDetailsVisible && <><div><small>자기 발표안</small><b>{team.ownScore}</b></div><i>+</i><div><small>낙찰 점수</small><b>{team.purchaseScore}</b></div><strong>{team.total}<small>점</small></strong><div className="token-remaining"><small>토큰</small><b>{team.tokensSpent}/7</b></div></>}</article>)}</div></section>
       </>}
       {adminLoggedIn && selectedAuction && <div className="prompt-backdrop" onMouseDown={() => setSelectedAuctionId("")}><section className="auction-admin-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setSelectedAuctionId("")}>×</button><span className="eyebrow">AUCTION RESULT ENTRY</span><h2>{recordString(selectedAuction, "teamName")} 대표 교수학습설계안</h2><p className="auction-modal-lead">발표 내용을 확인한 뒤 낙찰 모둠과 토큰을 입력하세요. 저장 즉시 참여자 게시판이 갱신됩니다.</p>
         <div className="auction-detail-grid">
@@ -1339,10 +1351,11 @@ export default function ConceptStudioApp() {
     const teamCount = new Set(adminRecords.map((item) => recordString(item, "teamName"))).size;
     const inquirySubmitted = teamDesigns.filter((item) => hasInquirySubmission(item)).length;
     const adminReviewsOpen = controls ? Boolean(controls.reviewsOpen) : true;
+    const scoresRevealed = Boolean(controls?.scoresRevealed);
     if (!adminLoggedIn) return <section className="admin-login-page"><form className="admin-login-card" onSubmit={loginAdmin}><span className="brand-mark">C</span><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>연수 진행 상태, 개인 설계 제출, 동료평가와 모둠 대표안을 확인합니다.</p><label>강사 이메일<input type="email" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} placeholder={store?.config.adminEmail || "teacher@example.com"} /></label><label>비밀번호<input type="password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} placeholder={store?.mode === "local" ? "데모 비밀번호 1234" : "Firebase 강사 계정 비밀번호"} /></label><button className="primary-btn full" disabled={busy}>{busy ? "확인 중..." : "관제실 입장"}</button></form></section>;
     return <section className="page-container admin-page"><div className="page-hero admin-hero"><div><span className="eyebrow">INSTRUCTOR CONTROL</span><h1>강사 관제실</h1><p>개인 설계 제출, 모둠별 상호평가, 대표안 선정과 경매 결과를 관리합니다.</p></div><button className="secondary-btn" onClick={async () => { await store?.logoutAdmin(); setAdminLoggedIn(false); }}>로그아웃</button></div>
       <div className="admin-stats"><article><small>참여자</small><b>{participantCount}</b><span>명</span></article><article><small>모둠</small><b>{teamCount}</b><span>개</span></article><article><small>Step 5 제출</small><b>{inquirySubmitted}</b><span>명</span></article><article><small>동료평가</small><b>{reviews.length}</b><span>건</span></article><article><small>대표안</small><b>{representatives.length}</b><span>/6</span></article><article><small>낙찰 결과</small><b>{auctionResults.length}</b><span>/6</span></article></div>
-      <section className="control-panel"><div><span className="eyebrow">LIVE CONTROL</span><h2>평가·경매 진행 제어</h2><p>관리자의 변경 사항은 참여자 화면에 즉시 반영됩니다.</p></div><div className="control-buttons"><button className={adminReviewsOpen ? "on" : ""} onClick={() => saveControls({ reviewsOpen: !adminReviewsOpen })}><span>WHERETO 평가</span><b>{adminReviewsOpen ? "진행 중" : "마감"}</b></button><button className={auctionReady ? "reveal" : ""} disabled={!auctionReady} onClick={() => setView("auction")}><span>경매 현황</span><b>{auctionReady ? "관리자 입력 화면 열기" : `대표안 ${representatives.length}/6`}</b></button></div></section>
+      <section className="control-panel"><div><span className="eyebrow">LIVE CONTROL</span><h2>평가·경매 진행 제어</h2><p>관리자의 변경 사항은 참여자 화면에 즉시 반영됩니다.</p></div><div className="control-buttons"><button className={adminReviewsOpen ? "on" : ""} onClick={() => saveControls({ reviewsOpen: !adminReviewsOpen })}><span>WHERETO 평가</span><b>{adminReviewsOpen ? "진행 중" : "마감"}</b></button><button className={auctionReady ? "reveal" : ""} disabled={!auctionReady} onClick={() => setView("auction")}><span>경매 현황</span><b>{auctionReady ? "관리자 입력 화면 열기" : `대표안 ${representatives.length}/6`}</b></button><button className={scoresRevealed ? "on" : ""} disabled={!auctionReady} onClick={() => saveControls({ scoresRevealed: !scoresRevealed })}><span>참여자 세부 점수</span><b>{scoresRevealed ? "공개 중 · 다시 숨기기" : "최종 결과 공개"}</b></button></div></section>
       <section className="control-panel"><div><span className="eyebrow">SAFE TEST MODE</span><h2>경매 기능 빠른 테스트</h2><p>실제 참여자 자료와 분리된 6개 모둠 대표안을 생성합니다. 테스트가 끝나면 테스트 자료만 한 번에 삭제할 수 있습니다.</p></div><div className="control-buttons"><button className="reveal" disabled={busy} onClick={createAuctionTestData}><span>테스트 데이터</span><b>{busy ? "처리 중..." : "6모둠 생성"}</b></button><button disabled={busy || !representatives.some((item) => Boolean(item.isTestData))} onClick={deleteAuctionTestData}><span>테스트 종료</span><b>데이터 삭제</b></button></div></section>
       <div className="admin-grid"><section className="admin-panel"><div className="panel-heading"><h2>참여자·설계 진행</h2><button className="mini-btn" onClick={refreshAdmin}>새로고침</button></div><div className="table-scroll"><table className="admin-table"><thead><tr><th>이름</th><th>교과군</th><th>교과</th><th>현재 단계</th><th>완성</th></tr></thead><tbody>{adminRecords.map((item) => { const design = teamDesigns.find((d) => d.id === item.id); return <tr key={item.id}><td>{recordString(item, "name")}</td><td>{recordString(item, "teamName")}</td><td>{recordString(item, "subject")}</td><td>Step {Number(design?.currentStep ?? 0) + 1}</td><td>{design?.completed ? "완료" : "진행 중"}</td></tr>})}</tbody></table></div></section>
       <section className="admin-panel"><div className="panel-heading"><h2>모둠 대표안</h2><button className="mini-btn" onClick={() => setView("showcase")}>한 장 발표 화면</button></div><div className="admin-ranking">{representatives.length ? representatives.map((item, index) => <article key={item.id}><span>{index + 1}</span><div><b>{recordString(item, "title")}</b><small>{recordString(item, "teamName")} · {recordString(item, "ownerName")}</small></div><strong>{representativeBaseScore(item)}<small>종합점</small></strong></article>) : <p className="empty-line">아직 확정된 대표안이 없습니다.</p>}</div></section></div>
